@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Glassfolk Before/After</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="hero">
+        <p class="eyebrow">Glassfolk</p>
+        <h1>Before / After</h1>
+        <p class="lede">
+          Pick two photos. We put the dirtier one on the left, the clean one on the right, and
+          download a single branded JPG.
+        </p>
+      </header>
+
+      <section class="panel">
+        <div class="photo-row">
+          <label class="photo-slot">
+            <span class="slot-label">Photo 1</span>
+            <input type="file" accept="image/*,.heic,.heif" data-slot="0" hidden />
+            <div class="slot-preview" data-preview="0">
+              <span class="slot-hint">Click or drop</span>
+            </div>
+            <span class="slot-name" data-name="0"></span>
+          </label>
+
+          <button type="button" id="swap-btn" class="swap-btn" title="Swap photos">⇄</button>
+
+          <label class="photo-slot">
+            <span class="slot-label">Photo 2</span>
+            <input type="file" accept="image/*,.heic,.heif" data-slot="1" hidden />
+            <div class="slot-preview" data-preview="1">
+              <span class="slot-hint">Click or drop</span>
+            </div>
+            <span class="slot-name" data-name="1"></span>
+          </label>
+        </div>
+
+        <label class="checkbox-row">
+          <input id="auto-detect" type="checkbox" checked />
+          Auto-detect before (left) vs after (right)
+        </label>
+        <p class="checkbox-help">
+          When off, Photo 1 is BEFORE and Photo 2 is AFTER.
+        </p>
+
+        <button id="build-btn" type="button" class="primary-btn" disabled>Create JPG</button>
+
+        <p id="status" class="status" aria-live="polite"></p>
+        <div id="download-wrap" class="download-wrap" hidden></div>
+      </section>
+    </main>
+    <script src="/static/app.js?v=1"></script>
+  </body>
+</html>

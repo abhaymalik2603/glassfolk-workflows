@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import re
+from io import BytesIO
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont
 
-
-def _load_rgb(path: Path) -> Image.Image:
-    with Image.open(path) as img:
-        return ImageOps.exif_transpose(img.convert("RGB"))
+from before_after.images import load_rgb
 
 
 def _cover_resize(img: Image.Image, width: int, height: int) -> Image.Image:
@@ -53,19 +50,14 @@ def _draw_centered_label(
     draw.text((x, y), text, font=font, fill=(255, 255, 255), stroke_width=stroke, stroke_fill=(0, 0, 0))
 
 
-def create_before_after_jpeg(
-    before_path: Path,
-    after_path: Path,
-    output_path: Path,
+def _render_before_after_canvas(
+    before: Image.Image,
+    after: Image.Image,
     *,
     canvas_size: int = 2048,
     border: int = 24,
     gutter: int = 12,
-    jpeg_quality: int = 92,
-) -> Path:
-    before = _load_rgb(before_path)
-    after = _load_rgb(after_path)
-
+) -> Image.Image:
     canvas_size = max(512, canvas_size)
     border = max(8, border)
     gutter = max(4, gutter)
@@ -93,24 +85,64 @@ def create_before_after_jpeg(
     label_y = border + int(label_band * 0.18)
     _draw_centered_label(draw, "BEFORE", left_x + panel_w // 2, label_y, font)
     _draw_centered_label(draw, "AFTER", right_x + panel_w // 2, label_y, font)
+    return canvas
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+def create_before_after_jpeg_bytes(
+    before: Image.Image | Path,
+    after: Image.Image | Path,
+    output_path: Path | None,
+    *,
+    canvas_size: int = 2048,
+    border: int = 24,
+    gutter: int = 12,
+    jpeg_quality: int = 92,
+) -> bytes:
+    if isinstance(before, Path):
+        before = load_rgb(before)
+    if isinstance(after, Path):
+        after = load_rgb(after)
+
+    canvas = _render_before_after_canvas(
+        before,
+        after,
+        canvas_size=canvas_size,
+        border=border,
+        gutter=gutter,
+    )
+
+    buffer = BytesIO()
+    canvas.save(buffer, format="JPEG", quality=jpeg_quality, optimize=True, subsampling=0)
+    data = buffer.getvalue()
+
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path.suffix.lower() not in {".jpg", ".jpeg"}:
+            output_path = output_path.with_suffix(".jpg")
+        output_path.write_bytes(data)
+
+    return data
+
+
+def create_before_after_jpeg(
+    before_path: Path,
+    after_path: Path,
+    output_path: Path,
+    *,
+    canvas_size: int = 2048,
+    border: int = 24,
+    gutter: int = 12,
+    jpeg_quality: int = 92,
+) -> Path:
+    create_before_after_jpeg_bytes(
+        load_rgb(before_path),
+        load_rgb(after_path),
+        output_path,
+        canvas_size=canvas_size,
+        border=border,
+        gutter=gutter,
+        jpeg_quality=jpeg_quality,
+    )
     if output_path.suffix.lower() not in {".jpg", ".jpeg"}:
         output_path = output_path.with_suffix(".jpg")
-
-    canvas.save(output_path, format="JPEG", quality=jpeg_quality, optimize=True, subsampling=0)
     return output_path
-
-
-def default_output_name(before_path: Path, after_path: Path) -> str:
-    from before_after.pairing import _tokenize_stem
-
-    _, key_a = _tokenize_stem(before_path.stem)
-    _, key_b = _tokenize_stem(after_path.stem)
-    if key_a and key_a == key_b:
-        safe = re.sub(r"[^\w\-]+", "_", key_a).strip("_") or "pair"
-        return f"{safe}_before_after.jpg"
-
-    stem_a = before_path.stem
-    stem_b = after_path.stem
-    return f"{stem_a}__{stem_b}_before_after.jpg"

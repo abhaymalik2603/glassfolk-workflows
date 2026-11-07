@@ -1,49 +1,23 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
-import imagehash
-import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
-
-BEFORE_TOKENS = frozenset(
-    {
-        "before",
-        "b4",
-        "pre",
-        "dirty",
-        "prior",
-        "old",
-    }
-)
-AFTER_TOKENS = frozenset(
-    {
-        "after",
-        "aftr",
-        "post",
-        "clean",
-        "new",
-    }
-)
-
-
-@dataclass(frozen=True)
-class Photo:
-    path: Path
-    phash: imagehash.ImageHash
-    sharpness: float
-    role: str | None  # "before" | "after" | None
-    base_key: str
+from before_after.images import IMAGE_EXTENSIONS, load_rgb, load_rgb_with_meta
+from before_after.matching import PhotoSignature, build_signature, match_pairs
 
 
 @dataclass(frozen=True)
 class Pair:
-    before: Path
-    after: Path
+    before: Path | None
+    after: Path | None
+    before_name: str
+    after_name: str
+    before_image: Image.Image
+    after_image: Image.Image
+    score: float
     method: str
 
 
@@ -55,165 +29,100 @@ def iter_image_paths(folder: Path) -> list[Path]:
     return paths
 
 
-def _load_rgb(path: Path) -> Image.Image:
-    with Image.open(path) as img:
-        return ImageOps.exif_transpose(img.convert("RGB"))
+def _signatures_from_paths(paths: list[Path]) -> list[PhotoSignature]:
+    signatures: list[PhotoSignature] = []
+    for index, path in enumerate(paths):
+        image, captured_at = load_rgb_with_meta(path)
+        signatures.append(build_signature(index, path.name, image, captured_at=captured_at))
+    return signatures
 
 
-def _sharpness_score(img: Image.Image) -> float:
-    gray = np.asarray(img.convert("L"), dtype=np.float32)
-    if gray.size < 4:
-        return 0.0
-    dx = np.diff(gray, axis=1)
-    dy = np.diff(gray, axis=0)
-    return float(np.var(dx) + np.var(dy))
+def _signatures_from_uploads(files: list[tuple[str, bytes]]) -> list[PhotoSignature]:
+    signatures: list[PhotoSignature] = []
+    for index, (name, data) in enumerate(files):
+        image, captured_at = load_rgb_with_meta(data)
+        signatures.append(build_signature(index, name, image, captured_at=captured_at))
+    return signatures
 
 
-def _tokenize_stem(stem: str) -> tuple[str | None, str]:
-    lower = stem.lower()
-    role: str | None = None
-    cleaned = lower
-
-    for token in BEFORE_TOKENS:
-        patterns = [
-            rf"\b{re.escape(token)}\b",
-            rf"_{re.escape(token)}$",
-            rf"^{re.escape(token)}_",
-            rf"-{re.escape(token)}$",
-            rf"^{re.escape(token)}-",
-        ]
-        for pattern in patterns:
-            if re.search(pattern, cleaned):
-                role = "before"
-                cleaned = re.sub(pattern, "", cleaned)
-                break
-        if role:
-            break
-
-    if role is None:
-        for token in AFTER_TOKENS:
-            patterns = [
-                rf"\b{re.escape(token)}\b",
-                rf"_{re.escape(token)}$",
-                rf"^{re.escape(token)}_",
-                rf"-{re.escape(token)}$",
-                rf"^{re.escape(token)}-",
-            ]
-            for pattern in patterns:
-                if re.search(pattern, cleaned):
-                    role = "after"
-                    cleaned = re.sub(pattern, "", cleaned)
-                    break
-            if role:
-                break
-
-    cleaned = re.sub(r"[_\-\s]+", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    cleaned = re.sub(r"\(\d+\)$", "", cleaned).strip()
-    base_key = cleaned or lower
-    return role, base_key
-
-
-def _analyze(path: Path) -> Photo:
-    img = _load_rgb(path)
-    ph = imagehash.phash(img, hash_size=16)
-    sharp = _sharpness_score(img)
-    role, base_key = _tokenize_stem(path.stem)
-    return Photo(path=path, phash=ph, sharpness=sharp, role=role, base_key=base_key)
-
-
-def _assign_before_after(a: Photo, b: Photo) -> tuple[Path, Path]:
-    if a.role == "before" and b.role == "after":
-        return a.path, b.path
-    if a.role == "after" and b.role == "before":
-        return b.path, a.path
-    if a.role == "before":
-        return a.path, b.path
-    if b.role == "before":
-        return b.path, a.path
-    if a.role == "after":
-        return b.path, a.path
-    if b.role == "after":
-        return a.path, b.path
-    # Dirtier / hazier glass tends to look softer (lower sharpness).
-    if a.sharpness <= b.sharpness:
-        return a.path, b.path
-    return b.path, a.path
-
-
-def _pair_by_filename(photos: list[Photo]) -> tuple[list[Pair], list[Photo]]:
-    by_key: dict[str, list[Photo]] = {}
-    for photo in photos:
-        by_key.setdefault(photo.base_key, []).append(photo)
-
-    pairs: list[Pair] = []
-    leftover: list[Photo] = []
-
-    for key, group in by_key.items():
-        if len(group) == 2:
-            before, after = _assign_before_after(group[0], group[1])
-            pairs.append(Pair(before=before, after=after, method=f"filename:{key}"))
-        elif len(group) > 2:
-            befores = [p for p in group if p.role == "before"]
-            afters = [p for p in group if p.role == "after"]
-            if befores and afters:
-                befores.sort(key=lambda p: p.sharpness)
-                afters.sort(key=lambda p: p.sharpness, reverse=True)
-                pairs.append(
-                    Pair(
-                        before=befores[0].path,
-                        after=afters[0].path,
-                        method=f"filename-group:{key}",
-                    )
-                )
-                leftover.extend(befores[1:] + afters[1:] + [p for p in group if p.role is None])
-            else:
-                leftover.extend(group)
-        else:
-            leftover.extend(group)
-
-    return pairs, leftover
-
-
-def _pair_by_similarity(photos: list[Photo], max_distance: int = 14) -> tuple[list[Pair], list[Photo]]:
-    if len(photos) < 2:
-        return [], photos
-
-    unused = set(range(len(photos)))
-    pairs: list[Pair] = []
-
-    while len(unused) >= 2:
-        best: tuple[int, int, int] | None = None
-        unused_list = list(unused)
-        for i in range(len(unused_list)):
-            for j in range(i + 1, len(unused_list)):
-                ia, ib = unused_list[i], unused_list[j]
-                dist = photos[ia].phash - photos[ib].phash
-                if dist <= max_distance and (best is None or dist < best[2]):
-                    best = (ia, ib, dist)
-
-        if best is None:
-            break
-
-        ia, ib, dist = best
-        unused.remove(ia)
-        unused.remove(ib)
-        before, after = _assign_before_after(photos[ia], photos[ib])
-        pairs.append(Pair(before=before, after=after, method=f"similarity:d={dist}"))
-
-    leftover = [photos[i] for i in sorted(unused)]
-    return pairs, leftover
-
-
-def match_before_after(folder: Path, similarity_threshold: int = 14) -> tuple[list[Pair], list[Path]]:
+def match_before_after_folder(
+    folder: Path,
+    *,
+    min_score: float = 0.38,
+) -> tuple[list[Pair], list[str]]:
     paths = iter_image_paths(folder)
     if not paths:
         return [], []
+    return match_before_after_paths(paths, min_score=min_score)
 
-    photos = [_analyze(path) for path in paths]
-    filename_pairs, leftover = _pair_by_filename(photos)
-    similarity_pairs, still_left = _pair_by_similarity(leftover, max_distance=similarity_threshold)
 
-    all_pairs = filename_pairs + similarity_pairs
-    unmatched = [p.path for p in still_left]
-    return all_pairs, unmatched
+def match_before_after_paths(
+    paths: list[Path],
+    *,
+    min_score: float = 0.38,
+) -> tuple[list[Pair], list[str]]:
+    signatures = _signatures_from_paths(paths)
+    return _to_pairs(signatures, min_score=min_score, method_prefix="visual")
+
+
+def match_before_after_uploads(
+    files: list[tuple[str, bytes]],
+    *,
+    min_score: float = 0.38,
+) -> tuple[list[Pair], list[str]]:
+    signatures = _signatures_from_uploads(files)
+    return _to_pairs(signatures, min_score=min_score, method_prefix="visual")
+
+
+def _to_pairs(
+    signatures: list[PhotoSignature],
+    *,
+    min_score: float,
+    method_prefix: str,
+) -> tuple[list[Pair], list[str]]:
+    raw_pairs, unmatched = match_pairs(signatures, min_score=min_score)
+    pairs: list[Pair] = []
+    for before, after, score in raw_pairs:
+        before_path = None
+        after_path = None
+        pairs.append(
+            Pair(
+                before=before_path,
+                after=after_path,
+                before_name=before.name,
+                after_name=after.name,
+                before_image=before.image,
+                after_image=after.image,
+                score=score,
+                method=f"{method_prefix}:score={score:.2f}",
+            )
+        )
+
+    # Re-attach paths when signatures came from disk (stored only in name for uploads).
+    unmatched_names = [sig.name for sig in unmatched]
+    return pairs, unmatched_names
+
+
+def match_before_after(folder: Path, similarity_threshold: int = 14) -> tuple[list[Pair], list[Path]]:
+    """CLI compatibility wrapper."""
+    pairs, unmatched_names = match_before_after_folder(
+        folder,
+        min_score=max(0.45, 0.52 - (similarity_threshold - 14) * 0.01),
+    )
+    unmatched_paths = [folder / name for name in unmatched_names]
+    # Fix paths on pairs
+    fixed: list[Pair] = []
+    for pair in pairs:
+        fixed.append(
+            Pair(
+                before=folder / pair.before_name,
+                after=folder / pair.after_name,
+                before_name=pair.before_name,
+                after_name=pair.after_name,
+                before_image=pair.before_image,
+                after_image=pair.after_image,
+                score=pair.score,
+                method=pair.method,
+            )
+        )
+    return fixed, unmatched_paths
